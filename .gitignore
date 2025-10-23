@@ -1,0 +1,17 @@
+Data/** 
+*.gz
+*.npy
+.DS_Store
+*.xlsx
+*.pyc
+\#ToDo.md
+trash/*
+*.pkl
+__marimo__/*
+out/spectrum/*
+marimo_analysis.py
+combine_atlas.py
+concatenate_csv.py
+create_ts.py
+*.txt
+sliding_window_per_network.py

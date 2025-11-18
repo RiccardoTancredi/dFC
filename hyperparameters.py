@@ -95,21 +95,23 @@ def choose_pca_components(
 # 1.a) PCA: plot cumulative explained variance
 # --------------------------------------------
 
-def plot_cumulative_variance(cumvar, targets, pca, X, fast_pca=False):
+def plot_cumulative_variance(cumvar, targets, pca, X, fast_pca=False, scree_plot=False, save_fig=False):
     colors = ['tab:red', 'tab:purple', 'tab:blue', 'tab:orange', 'tab:green']
-    fig, ax = plt.subplots(1, 2, figsize=(14, 5.5))
-    ax[0].plot(np.arange(1, len(cumvar)+1), cumvar, marker='o', lw=1, color=colors[0])
+    fig, ax = plt.subplots(1, 2 if scree_plot else 1, figsize=(14, 5.5))
+    if not scree_plot:
+        ax = [ax]
+    ax[0].plot(np.arange(1, len(cumvar)+1), cumvar, marker='o', markersize=8, markeredgewidth=0.1, markeredgecolor='lightgrey', lw=1, color=colors[0])
     handles, labels = [], []
     for kk, (t, n) in enumerate(targets.items(), start=2):
         ax[0].axhline(y=t, ls='--', lw=1, color=colors[kk])
         ax[0].axvline(x=n, ls='--', lw=1, color=colors[kk])
-        labels.append(f"{100*t:.1f}% → {n} PCs")
+        labels.append(rf"{100*t:.1f}\% → {n} PCs")
         handles.append(plt.Line2D([0], [0], color=colors[kk], lw=0))
         
-    ax[0].set_xlabel("Number of components")
-    ax[0].set_ylabel("Cumulative explained variance")
+    ax[0].set_xlabel("Number of principal components")
+    ax[0].set_ylabel("Cumulative explained variance", fontsize=20)
     title = f"PCA " + (f"(subset={X.shape[0]}, max_components={pca.n_components_})" if fast_pca else "cumulative explained variance")
-    ax[0].set_title(title)
+    ax[0].set_title(title, fontsize=30)
     ax[0].set_ylim(0, 1.1)
     ax[0].set_xscale('log')  # linear
     ax[0].grid(True, alpha=0.3)
@@ -120,15 +122,18 @@ def plot_cumulative_variance(cumvar, targets, pca, X, fast_pca=False):
     for txt, col in zip(leg.get_texts(), colors[2:2+len(labels)]):
         txt.set_color(col)
 
-    ax[1].plot(np.arange(1, len(pca.explained_variance_ratio_)+1), pca.explained_variance_ratio_, 
-               marker='o', linewidth=1, color=colors[1])
-    ax[1].set_xlabel("Component")
-    ax[1].set_ylabel("Explained variance ratio")
-    ax[1].set_title("Scree plot " + (f"(subset={X.shape[0]}, max_components={pca.n_components_})" if fast_pca else ""))
-    ax[1].grid(True, alpha=0.3)
-    ax[1].set_xscale('log')
+    if scree_plot:
+        ax[1].plot(np.arange(1, len(pca.explained_variance_ratio_)+1), pca.explained_variance_ratio_, 
+                marker='o', linewidth=1, color=colors[1])
+        ax[1].set_xlabel("Component")
+        ax[1].set_ylabel("Explained variance ratio")
+        ax[1].set_title("Scree plot " + (f"(subset={X.shape[0]}, max_components={pca.n_components_})" if fast_pca else ""))
+        ax[1].grid(True, alpha=0.3)
+        ax[1].set_xscale('log')
     
     plt.tight_layout()
+    if save_fig:
+        plt.savefig(f'imgs/{"_".join(title.split(" "))}.png', dpi=300)
     plt.show()
 
 
@@ -262,24 +267,24 @@ def plot_k_selection(Ks, sils, chs, dbs, best_k, X, fast_k_means=False):
     fig, ax = plt.subplots(3, 1, figsize=(7, 8), sharex=True)
     ax[0].plot(Ks, sils, marker='o', color=colors[0])
     ax[0].axvline(best_k, ls='--', lw=1, color=colors[-1])
-    ax[0].set_ylabel("Silhouette (↑ better)")
+    ax[0].set_ylabel("Silhouette (↑ better)", fontsize=12)
     ax[0].xaxis.set_major_locator(MaxNLocator(integer=True))
     ax[0].grid(True, alpha=0.3)
 
     ax[1].plot(Ks, chs, marker='o', color=colors[1])
     ax[1].axvline(Ks[np.argmax(chs)], ls='--', lw=1, color=colors[-1])
-    ax[1].set_ylabel("Calinski-Harabasz (↑ better)")
+    ax[1].set_ylabel("Calinski-Harabasz (↑ better)", fontsize=12)
     ax[1].xaxis.set_major_locator(MaxNLocator(integer=True))
     ax[1].grid(True, alpha=0.3)
 
     ax[2].plot(Ks, dbs, marker='o', color=colors[2])
     ax[2].axvline(Ks[np.argmin(dbs)], ls='--', lw=1, color=colors[-1])
-    ax[2].set_ylabel("Davies-Bouldin (↓ better)")
-    ax[2].set_xlabel("Number of clusters (K)")
+    ax[2].set_ylabel("Davies-Bouldin (↓ better)", fontsize=12)
+    ax[2].set_xlabel("Number of clusters (K)", fontsize=15)
     ax[2].xaxis.set_major_locator(MaxNLocator(integer=True))
     ax[2].grid(True, alpha=0.3)
 
-    fig.suptitle("K-means model selection " + (f"(subset={X.shape[0]})" if fast_k_means else ""), y=0.98)
+    ax[0].set_title("K-means model selection " + (f"(subset={X.shape[0]})" if fast_k_means else ""), fontsize=17)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()
    
@@ -424,5 +429,3 @@ def select_salient_windows(vec_FC, win_len_per_subj, N=None, static_FC=None, z_t
         keep = z > z_thresh
         Z.append(subj_windows_vec[keep])
     return np.concatenate(Z, axis=0)
-
-

@@ -11,6 +11,79 @@ from itertools import combinations
 from stats import bh_fdr
 
 
+# -------- Plot: step → autocorr for each win_len (one line per condition) --------
+def plot_autocorr_vs_step(df_cond_mean, win_lens=None, conditions=None, save=False,
+                          TR=1., title="Mean adjacent-window autocorrelation"):
+    """
+    df_cond_mean: mean output per condition (columns: condition, win_len, step, ac_mean)
+    """
+    if df_cond_mean is None or df_cond_mean.empty:
+        print("No plot.")
+        return
+    if win_lens is None:
+        win_lens = sorted(df_cond_mean["win_len"].unique())
+    if conditions is None:
+        conditions = sorted(df_cond_mean["condition"].unique())
+
+    n_plots = len(win_lens)
+    n_cols = 3
+    n_rows = int(np.ceil(n_plots / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 5*n_rows), sharey=True)
+    axes = np.array(axes).reshape(n_rows, n_cols)
+
+    colors = {c: plt.rcParams['axes.prop_cycle'].by_key()['color'][i % 10] for i, c in enumerate(conditions)}
+
+    for idx, L in enumerate(win_lens):
+        r, c = divmod(idx, n_cols)
+        ax = axes[r, c]
+
+        sub = df_cond_mean[df_cond_mean["win_len"] == L]
+        for cond in conditions:
+            ss = sub[sub["condition"] == cond]
+            ax.plot(ss["step"] * TR, ss["ac_mean"], marker='o', linewidth=1.5, 
+                    label=' '.join(cond.split('_')), color=colors[cond])
+        ax.set_title(f"Window length = {L}", fontsize=20)
+        ax.set_xlabel(r"step $\times$ TR (s)", fontsize=14)
+        ax.set_xticks([i-1 for i in ss["step"][::10]], [i-1 for i in ss["step"][::10]])
+        if c == 0:
+            ax.set_ylabel(r"mean corr(window$_t$, window$_{t+1}$)", fontsize=20)
+        ax.grid(True, alpha=0.3)
+
+    # Rimuove gli assi vuoti (se non multiplo di 3)
+    for idx in range(n_plots, n_rows * n_cols):
+        r, c = divmod(idx, n_cols)
+        fig.delaxes(axes[r, c])
+
+    # Legenda fuori a destra
+    handles, labels = ax.get_legend_handles_labels()
+    fig.legend(handles, labels, frameon=False, bbox_to_anchor=(0.9, 0.8), loc='upper left')
+
+    fig.suptitle(title, y=0.98, fontsize=35)
+    fig.tight_layout(rect=[0, 0, 0.9, 0.95])
+    fig.subplots_adjust(hspace=0.3, wspace=0.25)
+
+    if save:
+        plt.savefig(f'imgs/{"_".join(title.split(" "))}.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+# -------- Average heatmap across conditions --------    
+def plot_heatmap(df_grand, value_col="ESS_AR1_all", TR=1., save=False,
+                     title="Average ESS (AR1) across conditions"):
+    df_grand[['win_len', 'step']] *= TR
+    piv = df_grand.pivot(index="win_len", columns="step", values=value_col).sort_index()
+    X, Y = np.meshgrid(piv.columns.values, piv.index.values)
+    plt.figure(figsize=(8, 4.5))
+    pc = plt.pcolormesh(X, Y, piv.values, shading='nearest')
+    plt.colorbar(pc, label=' '.join(value_col.split('_')))
+    plt.xlabel(r"step $\times$ TR (s)"); plt.ylabel(r"Window length $\times$ TR (s)", fontsize=20)
+    # plt.xticks(piv.columns.values); 
+    plt.yticks(piv.index.values)
+    plt.title(title); plt.tight_layout()
+    if save:
+        plt.savefig(f'imgs/{"_".join(title.split(" "))}.png', dpi=300)
+    plt.show()
+
+
 def plot_state_centroids(km, pca, global_mean, n_rois):
     centroids = km.cluster_centers_ @ pca.components_ + global_mean
     for k, c in enumerate(centroids):
@@ -579,8 +652,8 @@ def plot_transition_matrix_diff(TA, TB, title="A - B (transition difference)",
  
 # ---------- plot average static FC ----------
 
-def plot_mean_static_FC(static_FC_by_condition, colors=None, 
-                        roi_to_networks=None,
+def plot_mean_static_FC(static_FC_by_condition, colors=None, cmap="viridis",
+                        roi_to_networks=None, save=False,
                         title='Average static FC per condition'):
     conds = list(static_FC_by_condition.keys())
     avgs = [np.mean(static_FC_by_condition[c], axis=0) for c in conds]
@@ -591,23 +664,37 @@ def plot_mean_static_FC(static_FC_by_condition, colors=None,
                   for i, cond in enumerate(conds)}
     
     fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(10, 10))
+    fig.subplots_adjust(hspace=0.3)
     axes = np.array(axes).ravel()
     
     im = None
     for ax, cond, avg in zip(axes, conds, avgs):
-        im = ax.matshow(np.tanh(avg), vmin=-1, vmax=1, cmap="viridis")
+        im = ax.matshow(np.tanh(avg), vmin=-1, vmax=1, cmap=cmap)
         title_color = (colors.get(cond) if cond in colors else None)
-        ax.set_title(cond, color=title_color)
+        ax.set_title(' '.join(cond.split('_')), color=title_color)
+        xx = np.linspace(min(10, avg.shape[0]-avg.shape[0]%10),
+                         min(210, avg.shape[0]-avg.shape[1]%10), 5)
+        ax.set_xticks(xx)
+        ax.set_yticks(xx)
+        ax.tick_params(axis='both', direction='out')
+        ax.grid(False)
     
     lefts = [ax.get_position().xmin for ax in axes]
     rights = [ax.get_position().xmax for ax in axes]
     left = min(lefts)
     right = max(rights)
 
-    cbar_height = 0.02
+    cbar_height = 0.01
     cbar_bottom = 0.05
     cbar_ax = fig.add_axes([left, cbar_bottom, right - left, cbar_height]) # [left, bottom, width, height]
-    fig.colorbar(im, cax=cbar_ax, orientation="horizontal")
+    cbar = fig.colorbar(im, cax=cbar_ax,
+                        extend='both', extendfrac=0.03, 
+                        orientation='horizontal')
+    # cbar.set_label(r'$FC_{ij}$', labelpad=10, fontsize=font)
+    cbar.ax.set_title(r'$FC_{ij}$', pad=10)
+    cbar.ax.tick_params(axis='x', direction='out')
+    cbar.set_ticks(np.arange(-1, 1.25, 0.25))
+    cbar.ax.grid(False)
     
     # Add networks names to axes
     if roi_to_networks is not None:
@@ -617,17 +704,21 @@ def plot_mean_static_FC(static_FC_by_condition, colors=None,
             for label, start, end in networks:
                 if kk % 2 == 0:  # labels only on left plots
                     center = (start + end) / 2
-                    ax.annotate(label, xy=(-0.08, center), xycoords=('axes fraction', 'data'),
-                                ha='right', va='center', rotation=30, fontsize=7)
+                    ax.annotate(label, xy=(-0.18, center), xycoords=('axes fraction', 'data'),
+                                ha='right', va='center', rotation=0, fontsize=9)
 
-                ax.axhline(start, color='black', linewidth=0.5, ls='--')
-                ax.axhline(end, color='black', linewidth=0.5, ls='--')
-                    
-    plt.suptitle(title, y=0.95)
+                ax.axhline(start, color='black', linewidth=0.7, ls='--')
+                ax.axhline(end, color='black', linewidth=0.7, ls='--')
+    
+    if title is not None:
+        plt.suptitle(title, y=0.95)
+    if save:
+        plt.savefig('imgs/Average_static_FC_per_condition.png', dpi=300)
     plt.show()
     
 
 def plot_mean_static_FC_single(static_FC, cond_name='BASELINE', 
+                               cmap="viridis", save=False,
                                colors=None, roi_to_networks=None):
     avg = np.mean(static_FC, axis=0)
     
@@ -637,17 +728,23 @@ def plot_mean_static_FC_single(static_FC, cond_name='BASELINE',
     
     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(6, 6))
     
-    im = ax.matshow(np.tanh(avg), vmin=-1, vmax=1, cmap="viridis")
+    im = ax.matshow(np.tanh(avg), vmin=-1, vmax=1, cmap=cmap)
     title_color = color['FC']
     ax.set_title(cond_name, color=title_color)
     
     left = ax.get_position().xmin
     right = ax.get_position().xmax
 
-    cbar_height = 0.02
-    cbar_bottom = 0.05
+    cbar_height = 0.01
+    cbar_bottom = 0.02
     cbar_ax = fig.add_axes([left, cbar_bottom, right - left, cbar_height]) # [left, bottom, width, height]
-    fig.colorbar(im, cax=cbar_ax, orientation="horizontal")
+    cbar = fig.colorbar(im, cax=cbar_ax,
+                        extend='both', extendfrac=0.03, 
+                        orientation='horizontal')
+    cbar.ax.set_title(r'$FC_{ij}$', pad=10)
+    cbar.ax.tick_params(axis='x', direction='out')
+    cbar.set_ticks(np.arange(-1, 1.25, 0.25))
+    cbar.ax.grid(False)
     
     # Add networks names to axes
     if roi_to_networks is not None:
@@ -655,11 +752,13 @@ def plot_mean_static_FC_single(static_FC, cond_name='BASELINE',
 
         for label, start, end in networks:
             center = (start + end) / 2
-            ax.annotate(label, xy=(-0.08, center), xycoords=('axes fraction', 'data'),
-                        ha='right', va='center', rotation=30, fontsize=7)
+            ax.annotate(label, xy=(-0.18, center), xycoords=('axes fraction', 'data'),
+                        ha='right', va='center', rotation=0, fontsize=9)
 
-            ax.axhline(start, color='black', linewidth=0.5, ls='--')
-            ax.axhline(end, color='black', linewidth=0.5, ls='--')
+            # ax.axhline(start, color='black', linewidth=0.7, ls='--')
+            ax.axhline(end, color='black', linewidth=0.7, ls='--')
+    if save:
+        plt.savefig(f'imgs/Average_static_FC_per_{cond_name}.png', dpi=300)
     plt.show()
 
 
@@ -899,9 +998,9 @@ def plot_state_distance_distributions(d_within_A, d_within_B, d_cross,
     
     
 # ---------------------- Edge-wise analysis plot ----------------------    
-# OK
+
 def plot_global_series_mean_sem(series_by_cs, conditions, colors=None, 
-                                step=None, win_len=None, TR=None,
+                                step=None, win_len=None, TR=None, save=False,
                                 title="Global FC over windows (mean ± SEM)"):
     """
     series_by_cs: {(cond, subj): g_t (W,)}
@@ -919,46 +1018,114 @@ def plot_global_series_mean_sem(series_by_cs, conditions, colors=None,
         mean = S_trim.mean(axis=0)
         sem  = S_trim.std(axis=0, ddof=1) / np.sqrt(S_trim.shape[0])
         t = (np.arange(Wmin) * step + (win_len / 2)) * TR if step is not None and win_len is not None and TR is not None else np.arange(Wmin)
-        plt.plot(t, mean, label=cond, color=colors[cond])
+        plt.plot(t, mean, label=' '.join(cond.split('_')), color=colors[cond])
         plt.fill_between(t, mean-sem, mean+sem, color=colors[cond], alpha=0.2)
-    plt.xlabel("Window" if step is None and win_len is None and TR is None else f"Time (s)"); plt.ylabel("Global FC (Fisher-z)")
-    plt.title(title); plt.legend(frameon=False, loc='upper right', bbox_to_anchor=(1.25,0.7)); plt.tight_layout(); plt.show()
-# OK
-def plot_topk_edge_heatmap(dfc_by_condition, cond, roi_roi_names, k=50, metric="dcv", cmap="viridis"):
+    plt.xlabel("Window" if step is None and win_len is None and TR is None else f"Time (s)"); plt.ylabel("Global FC (Fisher-z)", fontsize=25)
+    plt.title(title); plt.legend(frameon=False, loc='upper right', bbox_to_anchor=(1.35,0.7), fontsize=18); 
+    if save:
+        plt.savefig(f'imgs/{"_".join(title.split(" "))}.png', dpi=300)
+    plt.show() # plt.tight_layout(); 
+
+def plot_topk_edge_heatmap(dfc_by_condition, cond, roi_roi_names, k=50, metric="dcv",
+                           cmap="viridis", save=False, vmin=-1, vmax=1):
     """
     Show heatmap (edge x window) of the most dynamic top-k per condition
-    metric: 'dcv' (variance) o 'vol' (median |Δ|)
+    metric: 'dcv' (variance), 'median',  'vol' (volatility: median |Δ|)
     Edge selection made upon average across subjects.
     """
     subj_list = np.array(dfc_by_condition[cond])
     Ms = []
     for vec_windows in subj_list:
-        if metric.lower() == "dcv":
+        if metric.lower() == "dcv": # DCV = Dynamic Connectivity Variance
             m = vec_windows.var(axis=0, ddof=1)
         elif metric.lower() == "median":
+            m = np.median(vec_windows, axis=0)
+        elif metric.lower() == "vol":
             m = np.median(np.abs(np.diff(vec_windows, axis=0)), axis=0)
         else:
             if type(metric) == str:
                 raise ValueError(f"Unknown metric '{metric}'. Use 'dcv' or 'median'.")
             elif type(metric) == function:
-                m = metric(np.abs(np.diff(vec_windows, axis=0)), axis=0)
+                m = metric(vec_windows)
             else:
                 raise ValueError(f"metric must be 'dcv', 'median' or a function.")
         Ms.append(m)
     Mmean = np.mean(np.vstack(Ms), axis=0)  # (E,)
     # select top-k edge
     idx = np.argsort(Mmean)[::-1][:k]
-    # chain windows across all subjects (to display common trend): use the first subject for simplicity
     Z0 = subj_list[:, :, idx].T  # (k, W0, subj)
-
-    plt.figure(figsize=(10, 0.25*k + 2))
-    plt.imshow(Z0.mean(axis=-1), aspect="auto", cmap=cmap)
-    plt.colorbar(label="Fisher-z")
+    print(Z0.mean(axis=-1).min(), Z0.mean(axis=-1).max())
+    plt.figure(figsize=(16, 0.5*k + 2))
+    plt.imshow(Z0.mean(axis=-1), vmin=vmin, vmax=vmax, aspect="auto", 
+               cmap=cmap, extent=[0.5, 0.5+Z0.shape[1], -0.5, k-0.5])
+    plt.colorbar(label="Edge FC mean (Fisher-z)")
     plt.yticks(np.arange(k), [f"{roi_roi_names[e]}" for e in idx])
-    plt.xlabel("Window"); plt.ylabel("Top-k edges")
-    plt.title(f"{cond} - heatmap top-{k} edges by {metric.upper()}")
-    plt.tight_layout(); plt.show()
-# OK
+    plt.xticks(range(1, Z0.shape[1]+1), labels=[i if i in [1 if x == 0 else x for x in range(0, Z0.shape[1]+1, 5)] else '' for i in range(1, Z0.shape[1]+1)])
+    plt.xlabel(r"\# Window"); plt.ylabel("Top-k edges", fontsize=20)
+    title = f"{' '.join(cond.split('_'))}  heatmap top-{k} edges by {metric.upper()}"
+    plt.grid(False)
+    plt.title(title, fontsize=20)
+    plt.tight_layout(); 
+    if save:
+        plt.savefig(f'imgs/{"_".join(title.split(" "))}.png', dpi=300)
+    plt.show()
+
+def plot_topk_edge_heatmap_delta(dfc_by_condition, cond_pair, roi_roi_names, k=50, metric="dcv", 
+                                 cmap="viridis", save=False, vmin=-1, vmax=1):
+    """
+    Show heatmap (edge x window) of the most dynamic top-k per condition
+    metric: 'dcv' (variance) o 'vol' (median |Δ|)
+    Edge selection made upon average across subjects.
+    """
+    cond1, cond2 = cond_pair
+    subj_list1 = np.array(dfc_by_condition[cond1])
+    subj_list2 = np.array(dfc_by_condition[cond2])
+    Ms1, Ms2 = [], []
+    for vec_windows1, vec_windows2 in zip(subj_list1, subj_list2):
+        if metric.lower() == "dcv":
+            m1 = vec_windows1.var(axis=0, ddof=1)
+            m2 = vec_windows2.var(axis=0, ddof=1)
+        elif metric.lower() == "median":
+            m1 = np.median(vec_windows1, axis=0)
+            m2 = np.median(vec_windows2, axis=0)
+        elif metric.lower() == "vol":
+            m1 = np.median(np.abs(np.diff(vec_windows1, axis=0)), axis=0)
+            m2 = np.median(np.abs(np.diff(vec_windows2, axis=0)), axis=0)
+        else:
+            if type(metric) == str:
+                raise ValueError(f"Unknown metric '{metric}'. Use 'dcv' or 'median'.")
+            elif type(metric) == function:
+                m1 = metric(vec_windows1)
+                m2 = metric(vec_windows2)
+            else:
+                raise ValueError(f"metric must be 'dcv', 'median' or a function.")
+        Ms1.append(m1)
+        Ms2.append(m2)
+    Mmean1 = np.mean(np.vstack(Ms1), axis=0)  # (E,)
+    Mmean2 = np.mean(np.vstack(Ms2), axis=0)  # (E,)
+    Mmean = Mmean2 - Mmean1
+    # select top-k edge
+    idx = np.argsort(Mmean)[::-1][:k]
+    # chain windows across all subjects (to display common trend): use the first subject for simplicity
+    Z0 = subj_list2[:, :, idx].T  # (k, W0, subj)
+    print(Z0.mean(axis=-1).min(), Z0.mean(axis=-1).max())
+    plt.figure(figsize=(16, 0.5*k + 2))
+    plt.imshow(Z0.mean(axis=-1), aspect="auto", vmin=vmin, vmax=vmax,
+               cmap=cmap, extent=[0.5, 0.5+Z0.shape[1], -0.5, k-0.5])
+    plt.colorbar(label="Edge FC mean (Fisher-z)")
+    plt.yticks(np.arange(k), [f"{roi_roi_names[e]}" for e in idx])
+    plt.xticks(range(1, Z0.shape[1]+1), labels=[i if i in [1 if x == 0 else x for x in range(0, Z0.shape[1]+1, 5)] else '' for i in range(1, Z0.shape[1]+1)], fontsize=20)
+    plt.xlabel(r"\# Window", fontsize=25); plt.ylabel("Top-k edges", fontsize=20)
+    title = f"{' vs '.join([' '.join(name.split("_")) for name in cond_pair])} - heatmap top-{k} edges by {metric.upper()}"
+    plt.title(title, fontsize=20)
+    plt.grid(False)
+    plt.tight_layout()
+    if save:
+        plt.savefig(f'imgs/{"_".join(title.split(" "))}.png', dpi=300)
+    plt.show()    
+    
+
+
 def plot_violin_metric_by_netpair(df_metrics_netpair, metric="mu", condA=None, condB=None,
                                   netpairs=None, ax_array=None,
                                   compare_pairs=None,        # if None -> default [(REAL_PRE,REAL_POST),(SHAM_PRE,SHAM_POST)]
@@ -966,6 +1133,7 @@ def plot_violin_metric_by_netpair(df_metrics_netpair, metric="mu", condA=None, c
                                   paired_pairs=None,         # if None -> default pairs PRE↔POST
                                   alpha=0.05,
                                   fdr=False,                 # FDR for net_pair panel
+                                  metric_name=None,
                                   connector_kwargs=None):
     """ df_metrics_netpair: output of netpair_metrics_per_subject (long-form).
     Violin plot of the distributions of 'metric' for net_pair and condition (opz. only A/B). 
@@ -1033,8 +1201,19 @@ def plot_violin_metric_by_netpair(df_metrics_netpair, metric="mu", condA=None, c
             pc.set_alpha(0.3)
 
         ax.set_xticks(np.arange(1, len(conds)+1))
-        ax.set_xticklabels(conds, rotation=15)
-        ax.set_title(f"{metric} by net_pair" if condA is None else pair)
+        ax.set_xticklabels([' '.join(cond.split('_')) for cond in conds], rotation=15)
+        ax.set_title(rf'{metric if metric_name is None else metric_name} by networks pair' if condA is None else pair, fontsize=25)
+
+        positions = []
+        for i, d in enumerate(data, start=1):
+            x = np.random.normal(i, 0.04, size=len(d)) # avoid superpositions
+            ax.scatter(x, d, alpha=0.6, color='black', s=50, label=None)
+            positions.append(x)
+
+        # Draw lines between corresponding points
+        for y1, y2, x1, x2 in zip(data[0::2], data[1::2],
+                                  positions[0::2], positions[1::2]):
+            ax.plot([x1, x2], [y1, y2], color='lightgray', alpha=0.5, linewidth=1.5)
 
         entries = []
         x_pos = {c: i for i, c in enumerate(conds, start=1)}
@@ -1105,12 +1284,12 @@ def plot_violin_metric_by_netpair(df_metrics_netpair, metric="mu", condA=None, c
                 else: stars = 'n.s.'
                 if stars:
                     ax.text((x1 + x2) / 2.0, y + 0.01 * dy, stars,
-                            ha='center', va='bottom', fontsize=9)
+                            ha='center', va='bottom', fontsize=18)
             bump += 0.06 * dy
 
         ax.set_ylim(y_min, y_max + bump + 0.08 * dy)
 
-    axes[0].set_ylabel(metric)
+    axes[0].set_ylabel(rf'{metric if metric_name is None else metric_name}')
     plt.tight_layout()
     if ax_array is None:
         plt.show()

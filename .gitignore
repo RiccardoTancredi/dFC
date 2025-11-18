@@ -15,3 +15,6 @@ concatenate_csv.py
 create_ts.py
 *.txt
 sliding_window_per_network.py
+*.png
+analysis_working.ipynb
+style/plotstyle.mplstyle

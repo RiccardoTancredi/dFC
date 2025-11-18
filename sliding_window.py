@@ -1,4 +1,6 @@
 import numpy as np
+import pandas as pd
+from tqdm import tqdm
 
 def z_score_normalize(data, axis=0, ddof=0):
     mean = np.mean(data, axis=axis)
@@ -111,6 +113,89 @@ def dfc_for_condition(list_of_subject_TS, **kwargs):
         kwargs passed to dfc_for_subject (window parameters, gaussian, etc.).
     """
     return [dfc_for_subject(ts, **kwargs) for ts in list_of_subject_TS]
+
+
+# -------- dFC per (win_len, step) and autocorrelations within adjacent windows --------
+def mean_adjacent_autocorr(V):
+    """
+    V: (W,E) vettori di FC per finestra (Fisher-z).
+    Calcola la correlazione (Pearson) tra finestre adiacenti e ne fa la media.
+    """
+    if V is None or V.shape[0] < 2:
+        return np.nan
+    W = V.shape[0]
+    ac = []
+    for t in range(W - 1):
+        v1 = V[t]
+        v2 = V[t + 1]
+        # correlazione tra vettori (centra e normalizza)
+        v1c = v1 - v1.mean()
+        v2c = v2 - v2.mean()
+        denom = (np.linalg.norm(v1c) * np.linalg.norm(v2c) + 1e-12)
+        r = float((v1c @ v2c) / denom)
+        ac.append(r)
+    return float(np.mean(ac))
+
+
+# -------- GRID SEARCH: for each win_len e step=1..win_len --------
+def grid_autocorr(ts_by_condition, win_lens, step_max_mode="win_len", 
+                  gaussian=True,
+                  sigma=None, 
+                  fisher_z=True,
+                  vectorize=True,
+                  zscore=True
+):
+    """
+    ts_by_condition: {cond: [Ts_subj (T,N), ...]}  z-scored per ROI.
+    win_lens: iterable di window length (in samples/TR).
+    step_max_mode: "win_len" => for each win_len evaluate step=1..win_len,
+                   or a fixed int, or a dict {win_len: max_step}.
+    Return df with columns: condition, subj, win_len, step, ac_mean
+    and df_mean (average on subjects per condition) and df_grand (average on cond).
+    """
+    rows = []
+    for cond, subj_list in tqdm(ts_by_condition.items(), colour='blue'):
+        for s_idx, Ts in enumerate(subj_list):
+            T, N = Ts.shape
+            for L in win_lens:
+                if L < 5 or L > T-1:
+                    continue
+                # define step range
+                if step_max_mode == "win_len":
+                    max_step = L
+                elif isinstance(step_max_mode, int):
+                    max_step = min(step_max_mode, L)
+                elif isinstance(step_max_mode, dict):
+                    max_step = min(step_max_mode.get(L, L), L)
+                else:
+                    max_step = L
+                for step in range(1, max_step + 1):
+                    V = dfc_for_subject(Ts, win_len=L, step=step, 
+                                        gaussian=gaussian, sigma=sigma,
+                                        fisher_z=fisher_z, vectorize=vectorize, 
+                                        zscore=zscore)
+                    W = V.shape[0]
+                    if not (np.isfinite(W)):
+                        print(f'{W=}')
+                    ac = mean_adjacent_autocorr(V)
+                    ess = (W * (1 - ac) / (1 + ac)) if (np.isfinite(ac)) else np.nan
+                    rows.append(dict(condition=cond, subj=s_idx, win_len=L, step=step,
+                                     ac_mean=ac, W=W, ESS_AR1_subj=ess))
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df, None, None
+
+    # media su soggetti (per condizione)
+    g = df.groupby(["condition", "win_len", "step"], as_index=False)
+    df_cond_mean = g.agg(ac_mean=("ac_mean","mean"),
+                         W_mean=("W","mean"),
+                         ESS_AR1_mean=("ESS_AR1_subj","mean"))
+    # media across condizioni
+    g2 = df_cond_mean.groupby(["win_len","step"], as_index=False)
+    df_grand = g2.agg(ac_mean_all=("ac_mean","mean"),
+                      W_mean_all=("W_mean","mean"),
+                      ESS_AR1_all=("ESS_AR1_mean","mean"))
+    return df, df_cond_mean, df_grand
 
 
 #  ----- Helpers from extracting networks to perform sliding_window.py -----

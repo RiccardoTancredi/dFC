@@ -2,8 +2,7 @@ import numpy as np
 import pandas as pd
 from sliding_window import fisher_r_to_z
 from scipy.stats import ttest_rel, ttest_ind
-from scipy.stats import wilcoxon, mannwhitneyu
-from scipy.stats import pearsonr, linregress
+from scipy.stats import wilcoxon, mannwhitneyu, pearsonr, linregress, norm
 import statsmodels.formula.api as smf
 import numpy as np
 
@@ -133,7 +132,7 @@ def perm_test_centroid_similarity(
     centroids = centroid_per_condition_state(X_vec, labels, cond_of_win, K)
     CA = centroids[str(condA)]
     CB = centroids[str(condB)]
-    r_k, l2_k, zbar, l2m = centroid_similarity_stats(CA, CB)
+    r_k, l2_k, zbar, l2m = centroid_similarity_stats(CA, CB, K)
     observed = zbar if stat_kind == "zbar" else l2m
 
     # 2) Prepare permutation blocks at subject level
@@ -338,7 +337,7 @@ def cohens_d(x, y, equal_var=True):
 
 
 # ------------------- Edge-Wise Analysis -------------------
-# OK
+
 def bh_fdr(pvals, alpha=0.05):
     """Benjamini-Hochberg: return q-values and a significance mask."""
     pvals = np.asarray(pvals, float)
@@ -351,12 +350,8 @@ def bh_fdr(pvals, alpha=0.05):
     qvals = np.empty_like(qvals_ranked)
     qvals[order] = qvals_ranked
     return qvals, qvals <= alpha
-# OK
-def effect_size_paired(x, y):
-    """Cohen's d for paired measures."""
-    d = x - y
-    return np.mean(d) / (np.std(d, ddof=1) + 1e-12)
-# OK
+
+
 def effect_size_independent(x, y):
     """Hedges' g (independent, potential different variances)."""
     nx, ny = len(x), len(y)
@@ -368,7 +363,7 @@ def effect_size_independent(x, y):
     return g * J
 
 def wilcoxon_rank_biserial(x, y):
-    # r_rb = (2*W - T) / T, con T = n(n+1)/2 e W = somma dei ranghi positivi (SciPy statistic)
+    # r_rb = (2*W - T) / T, with T = n(n+1)/2 and W = sum of positive dei ranks
     # Note: SciPy wilcoxon ignore even-diff=0; here we assume at least one non-zero difference.
     res = wilcoxon(x, y, zero_method='wilcox', alternative='two-sided')
     n = np.sum((x - y) != 0)
@@ -377,7 +372,7 @@ def wilcoxon_rank_biserial(x, y):
     T = n * (n + 1) / 2.0
     W = res.statistic
     return float((2.0 * W - T) / T)
-# OK
+
 def ttests_edgewise(
     fc_by_cond,
     condA, condB,
@@ -387,24 +382,33 @@ def ttests_edgewise(
     alpha=0.05,
     tail="two-sided",  # "two-sided", "greater" (A>B), "less" (A<B)
     node_network=None, # array/list of length N: network labels
-    edge_mask=None     # NxN boolean matrix to narrow the analysis
+    edge_mask=None,    # NxN boolean matrix to narrow the analysis
+    # --- NEW ---
+    inference_level="edge",  # "edge" | "network" | "both"
+    method="parametric",     # "parametric" | "perm" (used for network analysis)
+    n_perm=5000,
+    fwer=False,              # if True, use max-T instead of FDR-BH for network analysis
+    random_state=0,
+    network_stat="auto"      # "auto" | "mean_abs_t" | "mean_t"
 ):
     """
-    fc_by_cond: dict[str] -> array (S, N, N)
-    condA/condB: names of the conditions to compare (fc_by_cond keys)
-    paired: True for PRE vs POST on the same subjects stessi soggetti; False for independent group
-    already_fisher_z: if False, apply arctanh to FC
-    node_network: (optional), network labels for each node (str or int)
-    edge_mask: (optional), boolean NxN to limit edges (e.g. only for the target network)
+    Returns (df_edge, df_summary).
+        - df_edge: As before (edgewise t, p, q, etc.)
+        - df_summary:
+        - If inference_level includes "network":
+            Adds p_perm / q columns (or p_fwer if fwer=True) for network-pair.
+        - Otherwise, it remains the same as before.
     """
+    rng = np.random.default_rng(random_state)
+
     A = np.array(fc_by_cond[condA])  # (S1, N, N)
     B = np.array(fc_by_cond[condB])  # (S2, N, N)
     N = A.shape[1]
     assert A.shape[1] == B.shape[1] == A.shape[2] == B.shape[2], f"Matrix must have the same N: {N}"
 
     if not already_fisher_z:
-        A = fisher_r_to_z(A)
-        B = fisher_r_to_z(B)
+        A = np.arctanh(A)
+        B = np.arctanh(B)
 
     iu, ju = np.triu_indices(N, k=1)
 
@@ -417,6 +421,7 @@ def ttests_edgewise(
     rows = []
     pvals = []
 
+    # ---------- EDGEWISE PARAMETRIC ----------
     for i, j in zip(iu, ju):
         x = A[..., i, j]
         y = B[..., i, j]
@@ -429,16 +434,17 @@ def ttests_edgewise(
             # Require same number of subjects and order matching
             assert x.shape[0] == y.shape[0], "Paired=True requires same number of subjects"
             tstat, p = ttest_rel(x, y, nan_policy='omit', alternative=tail)
-            es = effect_size_paired(x, y)       # Choen's d test
+            es = cohens_d(x, y)
         else:
             tstat, p = ttest_ind(x, y, equal_var=False, nan_policy='omit', alternative=tail)
-            es = effect_size_independent(x, y)  # Hedges' g
+            es = effect_size_independent(x, y)
         
         pvals.append(p)
         row = {
             "i": int(i), "j": int(j),
             "t": float(tstat),
             "p": float(p),
+            "sig_p": np.array(p) <= alpha,
             "meanA(r)": np.tanh(float(np.mean(x))),
             "meanB(r)": np.tanh(float(np.mean(y))),
             "diff_mean": np.tanh(float(np.mean(x))) - np.tanh(float(np.mean(y))),
@@ -446,22 +452,26 @@ def ttests_edgewise(
         }
         rows.append(row)
 
+    # No valid edge
     if not rows:
         return (
-            pd.DataFrame(columns=["i","j","t","p","q","meanA","meanB","diff_mean","effect_size",
-                                  "sig","t_pos","net_i","net_j","net_pair"]),
-            pd.DataFrame(columns=["net_pair","n_edges","n_sig","prop_sig",
-                                  "n_sig_pos","n_sig_neg","prop_sig_pos","prop_sig_neg",
+            pd.DataFrame(columns=["i","j","t","p","q","meanA(r)","meanB(r)","diff_mean","effect_size",
+                                  "sig_p","sig_q","t_pos","net_i","net_j","net_pair"]),
+            pd.DataFrame(columns=["net_pair","n_edges","n_sig_p","prop_sig_p",
+                                  "n_sig_pos_p","n_sig_neg_p","prop_sig_pos_p","prop_sig_neg_p",
+                                  "n_sig_q","prop_sig_ q",
+                                  "n_sig_pos_q","n_sig_neg_q","prop_sig_pos_q","prop_sig_neg_q",
                                   "n_sig_coherent","prop_sig_coherent",
-                                  "mean_effect","mean_diff","mean_t"])
+                                  "mean_effect","mean_diff","mean_t",
+                                  "p_perm","q","sig_q","p_fwer"])
         )
 
     df = pd.DataFrame(rows)
 
-    # FDR (BH)
+    # FDR (BH) edgewise
     qvals, sigmask = bh_fdr(df["p"].values, alpha=alpha)
     df["q"] = qvals
-    df["sig"] = sigmask # df["q"] <= alpha
+    df["sig_q"] = sigmask
     df["t_pos"] = df["t"] > 0  # True if A>B in terms of t
     df = df.sort_values(["q","p","i","j"]).reset_index(drop=True)
 
@@ -470,36 +480,47 @@ def ttests_edgewise(
         node_network = np.asarray(node_network)
         df["net_i"] = node_network[df["i"].values]
         df["net_j"] = node_network[df["j"].values]
-
         df["net_pair"] = [
-            " — ".join(sorted([str(a), str(b)])) for a, b in zip(df["net_i"], df["net_j"])
+            " - ".join(sorted([str(a), str(b)])) for a, b in zip(df["net_i"], df["net_j"])
         ]
     else:
         df["net_i"] = None
         df["net_j"] = None
         df["net_pair"] = None
 
-    # Network-pair summary (useful to understand where are the differences)
+    # ---------- SUMMARY ----------
     rows_sum = []
     grp = df.groupby("net_pair", dropna=False)
     for name, g in grp:
         n_edges = len(g)
-        n_sig   = int((g["sig"]).sum())
-        n_sig_pos = int(((g["sig"]) & (g["t_pos"])).sum())
-        n_sig_neg = int(((g["sig"]) & (~g["t_pos"])).sum())
-        prop_sig     = n_sig / n_edges if n_edges else np.nan
-        prop_sig_pos = n_sig_pos / n_edges if n_edges else np.nan
-        prop_sig_neg = n_sig_neg / n_edges if n_edges else np.nan
+        n_sig_p   = int((g["sig_p"]).sum())
+        n_sig_pos_p = int(((g["sig_p"]) & (g["t_pos"])).sum())
+        n_sig_neg_p = int(((g["sig_p"]) & (~g["t_pos"])).sum())
+        prop_sig_p     = n_sig_p / n_edges if n_edges else np.nan
+        prop_sig_pos_p = n_sig_pos_p / n_edges if n_edges else np.nan
+        prop_sig_neg_p = n_sig_neg_p / n_edges if n_edges else np.nan
+        n_sig_q   = int((g["sig_q"]).sum())
+        n_sig_pos_q = int(((g["sig_q"]) & (g["t_pos"])).sum())
+        n_sig_neg_q = int(((g["sig_q"]) & (~g["t_pos"])).sum())
+        prop_sig_q     = n_sig_q / n_edges if n_edges else np.nan
+        prop_sig_pos_q = n_sig_pos_q / n_edges if n_edges else np.nan
+        prop_sig_neg_q = n_sig_neg_q / n_edges if n_edges else np.nan
 
         out = {
             "net_pair": name,
             "n_edges": n_edges,
-            "n_sig": n_sig,
-            "prop_sig": prop_sig,   # proportion of significant edges = n_sig / n_edges 
-            "n_sig_pos": n_sig_pos, # positive sign (t > 0), meanA > meanB
-            "n_sig_neg": n_sig_neg, # negative sign (t < 0), meanA < meanB
-            "prop_sig_pos": prop_sig_pos, 
-            "prop_sig_neg": prop_sig_neg,
+            "n_sig_p": n_sig_p,
+            "prop_sig_p": prop_sig_p,   # n_sig / n_edges 
+            "n_sig_pos_p": n_sig_pos_p, # t > 0 (A > B)
+            "n_sig_neg_p": n_sig_neg_p, # t < 0 (A < B)
+            "prop_sig_pos_p": prop_sig_pos_p, 
+            "prop_sig_neg_p": prop_sig_neg_p,
+            "n_sig_q": n_sig_q,
+            "prop_sig_q": prop_sig_q,   # n_sig / n_edges 
+            "n_sig_pos_q": n_sig_pos_q, # t > 0 (A > B)
+            "n_sig_neg_q": n_sig_neg_q, # t < 0 (A < B)
+            "prop_sig_pos_q": prop_sig_pos_q, 
+            "prop_sig_neg_q": prop_sig_neg_q,
             "mean_effect": g["effect_size"].mean(),
             "mean_diff": g["diff_mean"].mean(),
             "mean_t": g["t"].mean(),
@@ -507,12 +528,187 @@ def ttests_edgewise(
         rows_sum.append(out)
 
     df_summary = pd.DataFrame(rows_sum).sort_values(
-        ["prop_sig","n_sig"], ascending=[False, False]
+        ["prop_sig_q","n_sig_q"], ascending=[False, False]
     ).reset_index(drop=True)
+
+    # ---------- NETWORK-LEVEL INFERENCE (perm or parametric) ----------
+    want_network = inference_level in ("network", "both")
+    if want_network and node_network is None:
+        # We can't do network-level inference without labels
+        # Return what we've calculated so far 
+        return df, df_summary
+
+    if want_network:
+        # Prepare edge index -> network-pair
+        nets = np.asarray(node_network)
+        net_i = nets[df["i"].values]
+        net_j = nets[df["j"].values]
+        net_pair = np.array([
+            " - ".join(sorted([str(a), str(b)]))
+            for a, b in zip(net_i, net_j)
+        ])
+        pairs = np.unique(net_pair)
+
+        # t_edge observed
+        t_edge_obs = df["t"].values
+
+        # Define statistics
+        if network_stat == "auto":
+            stat_mode = "mean_abs_t" if tail == "two-sided" else "mean_t"
+        else:
+            stat_mode = network_stat  # "mean_abs_t" or "mean_t"
+
+        def agg_stat(tvals):
+            if stat_mode == "mean_abs_t":
+                return np.mean(np.abs(tvals))
+            elif stat_mode == "mean_t":
+                return np.mean(tvals)
+            else:
+                raise ValueError("network_stat must be 'auto', 'mean_abs_t' o 'mean_t'")
+
+        # Observed statistics per pair
+        obs_stat = {p: agg_stat(t_edge_obs[net_pair == p]) for p in pairs}
+
+        if method == "parametric":
+            # Quick option: combine p of edges with Stouffer, then BH on pairs
+            # df["p"] are already the p edgewise
+            comb_p = {}
+            for p in pairs:
+                pv = np.clip(df.loc[net_pair == p, "p"].values, 1e-300, 1-1e-16)
+                z = norm.isf(pv)  # one-sided
+                zc = z.sum() / np.sqrt(len(z))
+                p_comb = norm.sf(zc)
+                comb_p[p] = p_comb
+
+            pvals_pairs = np.array([comb_p[p] for p in pairs])
+
+            # FDR correction
+            q_pairs, sig_pairs = bh_fdr(pvals_pairs, alpha=alpha)
+            add_cols = dict(p_perm=pvals_pairs, q=q_pairs, sig_q=sig_pairs)
+
+        elif method == "perm":
+            # Data preparation to recalculate t edgewise at each perm
+            # Construct subject x edge arrays for A and B
+            E = len(df)
+            # Map (i,j) in postion edge
+            if paired:
+                # Subject x edge differences
+                # Construct D from the original data for numerical consistency with parametric
+                S = A.shape[0]
+                # Stack differences on edges only in the DataFrame
+                D = np.empty((S, E), dtype=float)
+                k = 0
+                for i, j in zip(df["i"].values, df["j"].values):
+                    D[:, k] = (A[:, i, j] - B[:, i, j])
+                    k += 1
+
+                # t observed recalculated consistently
+                mu = D.mean(axis=0)
+                sd = D.std(axis=0, ddof=1) + 1e-12
+                t_edge_obs_perm = mu / (sd / np.sqrt(S))
+                obs_stat = {p: agg_stat(t_edge_obs_perm[net_pair == p]) for p in pairs}
+
+                # Permutation (sign-flip)
+                perm_stats = {p: np.empty(n_perm) for p in pairs}
+                maxT = np.empty(n_perm) if fwer else None
+                for b in range(n_perm):
+                    flips = rng.choice([-1, 1], size=S)
+                    Db = D * flips[:, None]
+                    mu_b = Db.mean(axis=0)
+                    sd_b = Db.std(axis=0, ddof=1) + 1e-12
+                    t_b  = mu_b / (sd_b / np.sqrt(S))
+
+                    # aggregate per network-pair
+                    cur_vals = []
+                    for p in pairs:
+                        te = t_b[net_pair == p]
+                        val = agg_stat(te)
+                        perm_stats[p][b] = val
+                        cur_vals.append(val)
+                    if fwer:
+                        maxT[b] = np.max(cur_vals)
+
+            else:
+                # Independent: labels shuffled by subject
+                S1, S2 = A.shape[0], B.shape[0]
+                S = S1 + S2
+                # Construct subject x edge matrices for the two groups
+                A_e = np.empty((S1, E), dtype=float)
+                B_e = np.empty((S2, E), dtype=float)
+                k = 0
+                for i, j in zip(df["i"].values, df["j"].values):
+                    A_e[:, k] = A[:, i, j]
+                    B_e[:, k] = B[:, i, j]
+                    k += 1
+
+                # recompute observed t (Welch)
+                m1 = A_e.mean(axis=0); v1 = A_e.var(axis=0, ddof=1)
+                m2 = B_e.mean(axis=0); v2 = B_e.var(axis=0, ddof=1)
+                n1 = float(S1); n2 = float(S2)
+                se = np.sqrt(v1/n1 + v2/n2) + 1e-12
+                t_edge_obs_perm = (m1 - m2) / se
+                obs_stat = {p: agg_stat(t_edge_obs_perm[net_pair == p]) for p in pairs}
+
+                # Permutations (label-shuffle)
+                X = np.vstack([A_e, B_e])  # S x E
+                labels = np.r_[np.zeros(S1, dtype=int), np.ones(S2, dtype=int)]
+                perm_stats = {p: np.empty(n_perm) for p in pairs}
+                maxT = np.empty(n_perm) if fwer else None
+
+                for b in range(n_perm):
+                    rng.shuffle(labels)
+                    idx1 = labels == 0
+                    idx2 = ~idx1
+                    X1 = X[idx1]; X2 = X[idx2]
+                    m1 = X1.mean(axis=0); v1 = X1.var(axis=0, ddof=1)
+                    m2 = X2.mean(axis=0); v2 = X2.var(axis=0, ddof=1)
+                    n1 = float(X1.shape[0]); n2 = float(X2.shape[0])
+                    se = np.sqrt(v1/n1 + v2/n2) + 1e-12
+                    t_b = (m1 - m2) / se
+
+                    cur_vals = []
+                    for p in pairs:
+                        te = t_b[net_pair == p]
+                        val = agg_stat(te)
+                        perm_stats[p][b] = val
+                        cur_vals.append(val)
+                    if fwer:
+                        maxT[b] = np.max(cur_vals)
+
+            # p-values per pair (upper-tail with respect to the chosen statistics)
+            pvals_pairs = np.array([
+                (1 + (perm_stats[p] >= obs_stat[p]).sum()) / (1 + n_perm)
+                for p in pairs
+            ])
+
+            if fwer:
+                # p_fwer for pair versus maximum distribution
+                p_fwer = np.array([
+                    (1 + (maxT >= obs_stat[p]).sum()) / (1 + n_perm)
+                    for p in pairs
+                ])
+                add_cols = dict(p_perm=pvals_pairs, q=np.nan, sig_q=np.nan, p_fwer=p_fwer)
+            else:
+                # FDR within pairs
+                q_pairs, sig_pairs = bh_fdr(pvals_pairs, alpha=alpha)
+                add_cols = dict(p_perm=pvals_pairs, q=q_pairs, sig_q=sig_pairs, p_fwer=np.nan)
+
+        else:
+            raise ValueError("method must be 'parametric' or 'perm'")
+
+        # Merge output summary
+        df_pairs = pd.DataFrame({
+            "net_pair": pairs,
+            "stat": [obs_stat[p] for p in pairs],
+            **add_cols
+        }).sort_values(["q" if not fwer else "p_fwer",
+                        "p_perm" if not fwer else "p_fwer"]).reset_index(drop=True)
+
+        df_summary = df_summary.merge(df_pairs, on="net_pair", how="left")
 
     return df, df_summary
 
-# OK
+
 def compare_state_metrics(metric_by_condition, condA, condB, *, paired=True,
                           test='ttest', alpha=0.05):
     """
@@ -535,7 +731,7 @@ def compare_state_metrics(metric_by_condition, condA, condB, *, paired=True,
         if paired:
             if test == 'ttest':
                 t, p = ttest_rel(x, y, nan_policy='omit')
-                es = effect_size_paired(x, y)
+                es = cohens_d(x, y)
                 stat_name, stat_val = 't', t
             elif test == 'wilcoxon':
                 res = wilcoxon(x, y, zero_method='wilcox', alternative='two-sided')
@@ -571,14 +767,14 @@ def compare_state_metrics(metric_by_condition, condA, condB, *, paired=True,
 
 
 # ------------------------ Correlation/Connectivity analysis ------------------------
-# OK
+
 def global_FC_measure(vec_window, func='mean'):
     """
     vec_window: (W, N*(N-1)/2) in Fisher-z
     Returns g_t: (W,) = average (upper-tri) per window
     """
     return vec_window.mean(axis=1) if func=='mean' else np.median(vec_window, axis=1)
-# OK
+
 def summarize_series(g):
     """
     g: (W,)
@@ -595,7 +791,7 @@ def summarize_series(g):
     t = np.arange(len(g))
     slope = float(linregress(t, g).slope) if len(g) > 1 else 0.0
     return mu, sd, vol, slope
-# OK
+
 def global_metrics_per_subject(dfc_by_condition):
     """
     dfc_by_condition: {cond: [ (W,E)_subj0, (W,E)_subj1, ... ] }
@@ -618,13 +814,13 @@ def global_metrics_per_subject(dfc_by_condition):
 
 
 # ------------------------ Aggregate by network ------------------------
-# OK
+
 def build_edge_masks_by_netpair(roi_net_masks, net_mask_names):
     """
     roi_net_masks: 
     net_mask_names:
     Retuns:
-      - masks: dict { "A — B": boolean (N*(N-1)/2) mask su upper-tri }
+      - masks: dict { "A - B": boolean (N*(N-1)/2) mask su upper-tri }
       - pairs: list of pair's names
     """
     net_names = list(net_mask_names.keys())
@@ -637,7 +833,7 @@ def build_edge_masks_by_netpair(roi_net_masks, net_mask_names):
             combined_mask = mask_a | mask_b # (N*(N-1)/2,)
             masks[name] = combined_mask
     return masks, list(masks.keys())
-# OK
+
 def netpair_series(vec_windows, mask, func='mean'):
     """
     vec_windows: (W,N*(N-1)/2), mask: (N*(N-1)/2) bool upper-tri
@@ -657,7 +853,7 @@ def netpair_series(vec_windows, mask, func='mean'):
             raise ValueError(f'func must be "mean", "median" or a callable function')
     else:
         return np.zeros((W,))
-# OK
+
 def netpair_metrics_per_subject(dfc_by_condition, roi_net_masks, net_mask_names, masks=None, **kwargs):
     """
     For each subject and condition, compute the series for each network pair and their summaries.
@@ -686,71 +882,8 @@ def netpair_metrics_per_subject(dfc_by_condition, roi_net_masks, net_mask_names,
     df_metrics = pd.DataFrame(rows)
     return series_by_cs_pair, df_metrics
 
-
-# ----------------- Edge-wise dynamics -----------------
-
-def edgewise_dynamics(vec_windows):
-    """
-    vec_windows: (W,E) Fisher-z
-    Returns:
-      - dcv: (E,) variance change in time for each edge (ddof=1)
-      - vol: (E,) median(|Δ|) change in time for each edge
-    """
-    W, _ = vec_windows.shape
-    dcv = vec_windows.var(axis=0, ddof=1) if W > 1 else np.zeros(vec_windows.shape[1])
-    vol = np.median(np.abs(np.diff(vec_windows, axis=0)), axis=0) if W > 1 else np.zeros(vec_windows.shape[1])
-    return dcv, vol
-
-def collect_edgewise_metrics(dfc_by_condition):
-    """
-    Returns:
-      - dcv_by_cond: {cond: (S, E)}
-      - vol_by_cond: {cond: (S, E)}
-    """
-    first = next(iter(dfc_by_condition.values()))[0]
-    E = first.shape[1]
-    N = int((1 + np.sqrt(1 + 8*E)) / 2)
-    if N*(N-1)//2 != E:
-        raise ValueError(f"E={E} is not a valid upper-triangular size.")
-    
-    dcv_by_cond, vol_by_cond = {}, {}
-    for cond, subj_list in dfc_by_condition.items():
-        D, V = [], []
-        for vec_windows in subj_list:
-            dcv, vol = edgewise_dynamics(vec_windows)
-            D.append(dcv); V.append(vol)
-        dcv_by_cond[cond] = np.vstack(D) if D else np.zeros((0, E))
-        vol_by_cond[cond] = np.vstack(V) if V else np.zeros((0, E))
-    return dcv_by_cond, vol_by_cond
-
-def compare_edgewise(metric_by_cond, condA, condB, *, paired=True, alpha=0.05):
-    """
-    metric_by_cond: {cond: (S, E)} for DCV o VOL
-    Returns DataFrame with columns: edge_idx, t, p, q, sig, meanA, meanB, diff
-    """
-    A = metric_by_cond[condA]
-    B = metric_by_cond[condB]
-    if paired:
-        assert A.shape[0] == B.shape[0], "Paired=True requires the same number of subjects"
-    E = A.shape[1]
-    rows, pvals = [], []
-    for e in range(E):
-        x, y = A[:, e], B[:, e]
-        if paired:
-            t, p = ttest_rel(x, y, nan_policy="omit")
-        else:
-            t, p = ttest_ind(x, y, equal_var=False, nan_policy="omit")
-        pvals.append(p)
-        rows.append(dict(edge_idx=e, t=float(t), p=float(p),
-                         meanA=float(np.mean(x)), meanB=float(np.mean(y)),
-                         diff=float(np.mean(x)-np.mean(y))))
-    df = pd.DataFrame(rows)
-    q, sig = bh_fdr(df["p"].values, alpha=alpha)
-    df["q"] = q; df["sig"] = sig
-    return df.sort_values(["q","p"]).reset_index(drop=True)
-
 # ------ Paired and mixed model REAL×TIME ------
-# OK
+
 def paired_tests_on_global(df_metrics, condA, condB, metrics=("mu","sd","vol","slope"), test="ttest", alpha=0.05):
     """
     df_metrics: from global_metrics_per_subject
@@ -820,11 +953,61 @@ def fit_mixed_interaction(df_long, metric_name, center_time=True):
     return res  # .summary()
 
 
-# # ---------- Mann-Whitney statistics ----------
+# ---------- Multi-layer graph metrics ----------
 
-# def compare_groups_metric(metric_groupA, metric_groupB):
-#     """
-#         Computes Mann-Whitney U test between 1D arrays (one metric per subject).
-#         Returns: U, p
-#     """
-#     return mannwhitneyu(metric_groupA, metric_groupB, alternative='two-sided')
+def flexibility(labels):
+    """
+    labels: (W, N)
+    Ritorna: flex (N,), frazione di cambi stato su W-1 transizioni.
+    """
+    W, N = labels.shape
+    if W < 2: return np.zeros(N)
+    changes = (labels[1:] != labels[:-1])  # (W-1, N) boolean
+    return changes.mean(axis=0)  # per nodo
+
+def promiscuity(labels):
+    W, N = labels.shape
+    pr = np.zeros(N, float)
+    for n in range(N):
+        pr[n] = len(np.unique(labels[:, n])) / max(1, W)
+    return pr
+
+def effective_num_communities(labels: np.ndarray) -> int:
+    """
+    K_eff: numero di community effettivamente presenti lungo tutte le finestre.
+    labels: (W, N) etichette intere (una partizione per finestra).
+    """
+    labels = np.asarray(labels)
+    if labels.ndim != 2:
+        raise ValueError("labels deve essere (W, N)")
+    return int(np.unique(labels).size)
+
+def dispersity(labels: np.ndarray) -> np.ndarray:
+    """
+    Dispersity/Promiscuity per nodo n: (# di community diverse visitate da n) / K_eff, in [0,1].
+    labels: (W, N)
+    return: (N,) valori per nodo
+    """
+    labels = np.asarray(labels)
+    W, N = labels.shape
+    K_eff = effective_num_communities(labels)
+    if K_eff == 0:
+        return np.zeros(N, dtype=float)
+
+    disp = np.zeros(N, dtype=float)
+    for n in range(N):
+        disp[n] = np.unique(labels[:, n]).size / K_eff
+    return disp    
+
+def module_allegiance_over_time(labels):
+    """
+    labels: (W, N) singola soluzione → allegiance media su W
+    Ritorna: (N, N)
+    """
+    W, N = labels.shape
+    M = np.zeros((N, N), float)
+    for w in range(W):
+        c = labels[w]
+        M += (c[:, None] == c[None, :]).astype(float)
+    M /= W
+    return M

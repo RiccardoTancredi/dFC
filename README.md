@@ -14,9 +14,9 @@ The goal of this analysis is to investigate how gamma tACS combined with iTBS mo
 5. [PCA and K-means Clustering](#PCA-and-K-means-clustering)
 6. [State Metrics](#state-metrics)
 7. [Statistical Comparisons](#statistical-comparisons)
-8. [Experimental Findings](#experimental-findings)
-9. [Code Usage](#code-usage)
-10. [ToDo / Future Extensions](#todo-future-extensions)
+8. [Experimental Findings](#experimental-findings-sham-vs-real)
+9. [Code Usage](#how-to-use-the-code)
+10. [ToDo / Future Extensions](#todo)
 11. [References](#references)
 12. [Authors](#authors)
 

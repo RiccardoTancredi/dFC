@@ -55,7 +55,7 @@ This repository implements the full dFC workflow and applies it to the TACSI neu
 
 4. #### Main Experimental Findings
 <p align="center">
-  <img src="readme/violin_plots_metrics_[&apos;Default_HIP&apos;].png" alt="DMN-HIP" width="750"/>
+  <img src="readme/violin_plots_metrics_Default_HIP.png" alt="DMN-HIP" width="750"/>
   <figcaption><b>Figure 7.</b> Connectivity metrics in DMN–Hippocampus networks.</figcaption>
 </p>
 

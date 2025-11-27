@@ -10,11 +10,12 @@ trash/*
 __marimo__/*
 out/spectrum/*
 marimo_analysis.py
-combine_atlas.py
-concatenate_csv.py
-create_ts.py
+lib/combine_atlas.py
+lib/concatenate_csv.py
+lib/create_ts.py
 *.txt
-sliding_window_per_network.py
+lib/sliding_window_per_network.py
 *.png
 analysis_working.ipynb
 style/plotstyle.mplstyle
+!/readme/*
